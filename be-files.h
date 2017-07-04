@@ -1,10 +1,10 @@
 /*
- * Copyright (c) 2013 Jan-Piet Mens <jpmens()gmail.com>
+ * Copyright (c) 2017, Diehl Connectivity Solutions GmbH.
  * All rights reserved.
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
- * 
+ *
  * 1. Redistributions of source code must retain the above copyright notice,
  *    this list of conditions and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
@@ -13,7 +13,7 @@
  * 3. Neither the name of mosquitto nor the names of its
  *    contributors may be used to endorse or promote products derived from
  *    this software without specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -27,71 +27,15 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include "hash.h"
-#include "uthash.h"
+#ifdef BE_FILES
 
-static struct my_opts {
-	char *name;		// key
-	char *value;
-	UT_hash_handle hh;
-} *globalopts = NULL;
+void *be_files_init();
+void be_files_destroy(void *handle);
+char *be_files_getuser(void *handle, const char *username, const char *password, int *authenticated);
+int be_files_superuser(void *handle, const char *username);
+int be_files_aclcheck(void *handle, const char *clientid, const char *username, const char *topic, int access);
 
-/*
- * Add a key/value pair to the hash.
- */
+int be_files_aclpatterns_available(void);
+int be_files_aclpatterns_check(const char *clientid, const char *username, const char *topic, int access);
 
-void p_add(char *name, char *value)
-{
-	struct my_opts *mo;
-
-	mo = (struct my_opts *)malloc(sizeof(struct my_opts));
-	if (mo == NULL) {
-		return;
-	}
-	mo->name = strdup(name);
-	mo->value = strdup(value);
-
-	HASH_ADD_KEYPTR(hh, globalopts, mo->name, strlen(mo->name), mo);
-}
-
-/*
- * Recursively free the hash
- */
-
-void p_freeall()
-{
-	struct my_opts *mo, *tmp;
-
-	HASH_ITER(hh, globalopts, mo, tmp) {
-		if (mo->value)
-			free(mo->value);
-		if (mo->name)
-			free(mo->name);
-		HASH_DEL(globalopts, mo);
-	}
-}
-
-/*
- * Return value for key or NULL.
- * Returned value MUST NOT be freed by caller.
- */
-
-char *p_stab(const char *key)
-{
-	struct my_opts *mo;
-
-	HASH_FIND_STR(globalopts, key, mo);
-
-	return ( (mo) ? mo->value : NULL);
-}
-
-void p_dump()
-{
-	struct my_opts *mo, *tmp;
-
-	HASH_ITER(hh, globalopts, mo, tmp) {
-		printf("-> %s=%s\n", mo->name, mo->value);
-	}
-}
+#endif /* BE_FILES */

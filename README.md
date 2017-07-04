@@ -13,6 +13,7 @@ of several distinct back-ends:
 * HTTP (custom HTTP API)
 * JWT
 * MongoDB
+* Files
 
 ## Introduction
 
@@ -20,16 +21,16 @@ This plugin can perform authentication (check username / password)
 and authorization (ACL). Currently not all back-ends have the same capabilities
 (the the section on the back-end you're interested in).
 
-| Capability                 | mysql | redis | cdb   | sqlite | ldap | psk | postgres | http | jwt | MongoDB |
-| -------------------------- | :---: | :---: | :---: | :---:  | :-:  | :-: | :------: | :--: | :-: | :-----: |
-| authentication             |   Y   |   Y   |   Y   |   Y    |  Y   |  Y  |    Y     |  Y   |  Y  |  Y      |
-| superusers                 |   Y   |       |       |        |      |  2  |    Y     |  Y   |  Y  |  Y      |
-| acl checking               |   Y   |   Y   |   1   |   1    |      |  2  |    Y     |  Y   |  Y  |  Y      |
-| static superusers          |   Y   |   Y   |   Y   |   Y    |      |  2  |    Y     |  Y   |  Y  |  Y      |
+| Capability                 | mysql | redis | cdb   | sqlite | ldap | psk | postgres | http | jwt | MongoDB | Files |
+| -------------------------- | :---: | :---: | :---: | :---:  | :-:  | :-: | :------: | :--: | :-: | :-----: | :----: 
+| authentication             |   Y   |   Y   |   Y   |   Y    |  Y   |  Y  |    Y     |  Y   |  Y  |  Y      | Y
+| superusers                 |   Y   |       |       |        |      |  3  |    Y     |  Y   |  Y  |  Y      | N
+| acl checking               |   Y   |   1   |   2   |   2    |      |  3  |    Y     |  Y   |  Y  |  Y      | Y
+| static superusers          |   Y   |   Y   |   Y   |   Y    |      |  3  |    Y     |  Y   |  Y  |  Y      | Y
 
- 1. Currently not implemented; back-end returns TRUE
- 2. Dependent on the database used by PSK
-
+ 1. Topic wildcards (+/#) are not supported
+ 2. Currently not implemented; back-end returns TRUE
+ 3. Dependent on the database used by PSK
 
 Multiple back-ends can be configured simultaneously for authentication, and they're attempted in
 the order you specify. Once a user has been authenticated, the _same_ back-end is used to
@@ -64,6 +65,14 @@ respectively. This allows ACLs in the database to look like this:
 The plugin supports so-called _superusers_. These are usernames exempt
 from ACL checking. In other words, if a user is a _superuser_, that user
 doesn't require ACLs.
+
+A static superuser is one configured with the _fnmatch(3)_ `auth_opt_superusers`
+option. The other 'superusers' are configured (i.e. enabled) from within the
+particular database back-end. Effectively both are identical in that ACL
+checking is disabled if a user is a superuser.
+
+Note that not all back-ends currently have 'superuser' queries implemented.
+todo. At that point the `auth_opt_superusers` will probably disappear.
 
 ## Building the plugin
 
@@ -126,7 +135,9 @@ The following `auth_opt_` options are supported by the mysql back-end:
 | mysql_opt_reconnect | true         |             | enable MYSQL_OPT_RECONNECT option
 | mysql_auto_connect  | true         |             | enable auto_connect function
 | anonusername   | anonymous         |             | username to use for anonymous connections
-| cacheseconds   | 300               |             | number of seconds to cache ACL lookups. 0 disables
+| cacheseconds   |                   |             | Deprecated. Alias for acl_cacheseconds
+| acl_cacheseconds  | 300               |             | number of seconds to cache ACL lookups. 0 disables
+| auth_cacheseconds | 0                 |             | number of seconds to cache AUTH lookups. 0 disables
 
 The SQL query for looking up a user's password hash is mandatory. The query
 MUST return a single row only (any other number of rows is considered to be
@@ -295,7 +306,7 @@ auth_opt_redis_userquery GET %s
 auth_opt_redis_aclquery GET %s-%s
 ```
 
-In `auth_opt_redis_userquery` the parameter is the _username_, whereas in `auth_opt_redis_aclquery`, the first parameter is the _username_ and the second is the _topic_.
+In `auth_opt_redis_userquery` the parameter is the _username_, whereas in `auth_opt_redis_aclquery`, the first parameter is the _username_ and the second is the _topic_. When using ACLS _topic_ must be an exact match - wildcards are not supported.
 
 If no options are provided then it will default to not using an ACL and using the above userquery.
 
@@ -515,47 +526,123 @@ the beginning of the line indicating a _superuser_)
 ```
 
 ## MongoDB
-The `mongo` back-end works with superuser and ACL checks with the following collections format.
+The `mongo` back-end works with superuser and ACL checks. Additional build dependencies are https://github.com/mongodb/mongo-c-driver `>=1.4.0`
+and https://github.com/mongodb/libbson `>=1.4.0`.
+
+You should set up a users collection (required) and a topic lists collection (optional) with the following format:
+
+#### Users collection
+
+Each user document must have a username, a hashed password, and at least one of:
+
+ - A superuser prop, allowing full access to all topics
+ - An embedded array or sub-document to use as an ACL (see 'ACL format')
+ - A foreign key pointing to another document containing an ACL (see 'ACL format')
+ 
+You may use any combination of these options; authorisation will be granted if any check passes.
+
+The user document has the following format (note that the property names are configurable variables, see 'Configuration').
 
 ```
-users = {
-         username: "user",
-	     password: "PBKDF_string"
-	     topics: int (topicID location)
-	     superuser: int (1 true, 0 false)
-        }
-
-topics = {
-           _id: int,
-		   topics: ["xx/xx/#", "yy/#", ...]
-		 }
+{
+    [user_username_prop]: string, // Username as given in the MQTT connect request
+    [user_password_prop]: string, // A PBKDF2 hash, see 'Passwords' section
+    [user_topiclist_fk_prop]: int | oid | string, // reference to a document in collection_topics)
+    [user_topics_prop]: string[] | { [topic: string]: "r"|"w"|"rw" }, // see 'ACL format'
+    [user_superuser_prop]: int | boolean // optional, superuser if truthy
+}
 ```
 
-The following `auth_opt_mongo_` options are supported by the mysql back-end:
+As an example using default options, a user document with an embedded ACL might look like:
 
-| Option             | default           | Meaning               |
-| ------------------ | ----------------- | --------------------- |
-| host               | localhost         | Hostname/Address
-| port               | 27017             | TCP port
-| user               |                   | Username
-| password           |                   | Password
-| authSource         |                   | Authentication Database Name
-| database           | mqGate            | Database Name
-| collection_users   | users             | Collection for User Documents
-| collection_topics  | topics            | Collection for Topic Documents
-| location_password  | password          | Password field name in User Document
-| location_topic     | topics            | Topic Document pointer field name in User Document
-| lotcation_topicId  | _id               | Field name that location_topic points to in Topic Document
-| location_superuser | superuser         | Superuser field name in User Document
+```json
+{
+    "username": "user1",
+    "password": "PBKDF2$sha256$901$8ebTR72Pcmjl3cYq$SCVHHfqn9t6Ev9sE6RMTeF3pawvtGqTu",
+    "superuser": false,
+    "topics": {
+        "public/#": "r",
+	"client/user1/#": "rw"
+    }
+}
+```
+
+#### Topic lists collection (optional)
+
+If the user document references a separate topics document, that document should exist and must have the format:
+
+```
+{
+    [topiclist_key_prop]: int | oid | string, // unique id, as referenced by users[user_topiclist_fk_prop],
+    [topiclist_topics_prop]: string[] | { [topic: string]: "r"|"w"|"rw" } // see 'ACL format'
+}
+```
+
+This strategy will be especially suitable if you have a complex ACL shared between many users.
+
+#### ACL format
+
+Topics may be given as either an array of topic strings, eg `["topic1/#", "topic2/+"]`, in which case all topics will 
+be read-write, or as a sub-document mapping topic names to the strings `"r"`, `"w"`, `"rw"`, eg 
+`{ "article/#":"r", "article/+/comments":"rw", "ballotbox":"w" }`.
+
+#### Configuration
+
+The following `auth_opt_mongo_` options are supported by the mongo back-end:
+
+| Option                 | default       | Meaning               |
+| ---------------------- | ------------- | --------------------- |
+| uri                    | mongodb://localhost:27107 | [MongoDB connection string] (database part is ignored)
+| database               | mqGate                    | Name of the database containing users (and topiclists)
+| user_coll              | users                     | Collection for user documents
+| topiclist_coll         | topics                    | Collection for topiclist documents (optional if embedded topics are used)
+| user_username_prop     | username                  | Username property name in the user document
+| user_password_prop     | password                  | Password property name in the user document
+| user_superuser_prop    | superuser                 | Superuser property name in the user document
+| user_topics_prop       | topics                    | Name of a property on the user document containing an embedded topic list
+| user_topiclist_fk_prop | topics                    | Property used as a foreign key to reference a topiclist document
+| topiclist_key_prop     | _id                       | Unique key in the topiclist document pointed to by user_topiclist_fk_prop
+| topiclist_topics_prop  | topics                    | Property containing topics within the topiclist document
 
 Mosquitto configuration for the `mongo` back-end:
 ```
 auth_plugin /home/jpm/mosquitto-auth-plug/auth-plug.so
-auth_opt_mongo_host localhost
-auth_opt_mongo_port 27017
+auth_opt_mongo_uri mongodb://localhost:2017
 ```
-currently no readwrite checks on ACL, all topics will be readwrite, do not add a flag to the array of topics in db.
+## Files
 
+The files backend attempts to re-implement the files behavior in vanilla Mosquitto, however the user's password file contains PBKDF2 passwords instead of passwords hashed with the `mosquitto-passwd` program; you would use our `np` utility or similar to create the PBKDF2 hashes.
+
+The configuration directives for the `Files` backend are as follows:
+
+```
+auth_opt_backends files
+auth_opt_password_file file.pw
+auth_opt_acl_file file.acl
+```
+
+with examples of these files being:
+
+#### `password_file`
+
+```
+# comment
+jpm:PBKDF2$sha256$901$UGfDz79cAaydRsEF$XvYwauPeviFd1NfbGL+dxcn1K7BVfMeW
+jane:PBKDF2$sha256$901$wvvH0fe7Ftszt8nR$NZV6XWWg01dCRiPOheVNsgMJDX1mzd2v
+```
+
+#### `acl_file`
+
+```
+user jane
+topic read #
+
+user jpm
+topic dd
+
+```
+
+The syntax for the ACL file is that as described in `mosquitto.conf(5)`.
 
 ## Passwords
 
@@ -573,6 +660,12 @@ PBKDF2$sha256$901$8ebTR72Pcmjl3cYq$SCVHHfqn9t6Ev9sE6RMTeF3pawvtGqTu
   |      +----------------------------------------- : hash function
   +------------------------------------------------ : marker
 ```
+
+Note that the `salt` by default will be taken as-is (thus it will not be
+base64 decoded before the validation). In case your own implementation uses
+the raw bytes when hashing the password and base64 is only used for display
+purpose, compile this project with the `-DRAW_SALT` flag (you could add this
+in the `config.mk` file to `CFG_CFLAGS`).
 
 ## Creating a user
 
@@ -706,6 +799,7 @@ Received DISCONNECT from mosqpub/90759-tiggr.ww.
  [1]: https://exyr.org/2011/hashing-passwords/
  [hiredis]: https://github.com/redis/hiredis
  [uthash]: http://troydhanson.github.io/uthash/
+ [MongoDB connection string]: https://docs.mongodb.com/manual/reference/connection-string/
 
 ## Possibly related
 

@@ -59,6 +59,7 @@
 #include "be-http.h"
 #include "be-jwt.h"
 #include "be-mongo.h"
+#include "be-files.h"
 
 #include "userdata.h"
 #include "cache.h"
@@ -101,7 +102,7 @@ int mosquitto_auth_plugin_version(void)
 int mosquitto_auth_plugin_init(void **userdata, struct mosquitto_auth_opt *auth_opts, int auth_opt_count)
 {
 	int i;
-	char *backends = NULL, *p, *q;
+	char *backends = NULL, *p, *_p, *q;
 	struct mosquitto_auth_opt *o;
 	struct userdata *ud;
 	int ret = MOSQ_ERR_SUCCESS;
@@ -125,8 +126,10 @@ int mosquitto_auth_plugin_init(void **userdata, struct mosquitto_auth_opt *auth_
 	ud->superusers	= NULL;
 	ud->fallback_be = -1;
 	ud->anonusername = strdup("anonymous");
-	ud->cacheseconds = 300;
+	ud->acl_cacheseconds = 300;
+	ud->auth_cacheseconds = 0;
 	ud->aclcache = NULL;
+	ud->authcache = NULL;
 
 	/*
 	 * Shove all options Mosquitto gives the plugin into a hash,
@@ -145,8 +148,10 @@ int mosquitto_auth_plugin_init(void **userdata, struct mosquitto_auth_opt *auth_
 			free(ud->anonusername);
 			ud->anonusername = strdup(o->value);
 		}
-		if (!strcmp(o->key, "cacheseconds"))
-			ud->cacheseconds = atol(o->value);
+		if (!strcmp(o->key, "cacheseconds") || !strcmp(o->key, "acl_cacheseconds"))
+			ud->acl_cacheseconds = atol(o->value);
+		if (!strcmp(o->key, "auth_cacheseconds"))
+			ud->auth_cacheseconds = atol(o->value);
 		if (!strcmp(o->key, "log_quiet")) {
 			if(!strcmp(o->value, "false") || !strcmp(o->value, "0")){
 				log_quiet = 0;
@@ -172,9 +177,9 @@ int mosquitto_auth_plugin_init(void **userdata, struct mosquitto_auth_opt *auth_
 		_fatal("No backends configured.");
 	}
 
-        p = strdup(backends);
+	_p = p = strdup(backends);
 
-        _log(LOG_NOTICE, "** Configured order: %s\n", p);
+	_log(LOG_NOTICE, "** Configured order: %s\n", p);
 
 	ud->be_list = (struct backend_p **)malloc((sizeof (struct backend_p *)) * (NBACKENDS + 1));
 
@@ -203,8 +208,8 @@ int mosquitto_auth_plugin_init(void **userdata, struct mosquitto_auth_opt *auth_
 	nord++;
 #endif /* BE_PSK */
 
-        for (q = strsep(&p, ","); q && *q && (nord < NBACKENDS); q = strsep(&p, ",")) {
-                int found = 0;
+	for (q = strsep(&p, ","); q && *q && (nord < NBACKENDS); q = strsep(&p, ",")) {
+		int found = 0;
 #if BE_MYSQL
 		if (!strcmp(q, "mysql")) {
 			*bep = (struct backend_p *)malloc(sizeof(struct backend_p));
@@ -339,22 +344,22 @@ int mosquitto_auth_plugin_init(void **userdata, struct mosquitto_auth_opt *auth_
 #endif
 
 #if BE_JWT
-        if (!strcmp(q, "jwt")) {
- 			*bep = (struct backend_p *)malloc(sizeof(struct backend_p));
- 			memset(*bep, 0, sizeof(struct backend_p));
- 			(*bep)->name = strdup("jwt");
- 			(*bep)->conf = be_jwt_init();
- 			if ((*bep)->conf == NULL) {
- 				_fatal("%s init returns NULL", q);
- 			}
- 			(*bep)->kill =  be_jwt_destroy;
- 			(*bep)->getuser =  be_jwt_getuser;
- 			(*bep)->superuser =  be_jwt_superuser;
- 			(*bep)->aclcheck =  be_jwt_aclcheck;
- 			found = 1;
- 			ud->fallback_be = ud->fallback_be == -1 ? nord : ud->fallback_be;
- 			PSKSETUP;
- 		}
+		if (!strcmp(q, "jwt")) {
+			*bep = (struct backend_p *)malloc(sizeof(struct backend_p));
+			memset(*bep, 0, sizeof(struct backend_p));
+			(*bep)->name = strdup("jwt");
+			(*bep)->conf = be_jwt_init();
+			if ((*bep)->conf == NULL) {
+				_fatal("%s init returns NULL", q);
+			}
+			(*bep)->kill =  be_jwt_destroy;
+			(*bep)->getuser =  be_jwt_getuser;
+			(*bep)->superuser =  be_jwt_superuser;
+			(*bep)->aclcheck =  be_jwt_aclcheck;
+			found = 1;
+			ud->fallback_be = ud->fallback_be == -1 ? nord : ud->fallback_be;
+			PSKSETUP;
+		}
 #endif
 
 #if BE_MONGO
@@ -374,15 +379,33 @@ int mosquitto_auth_plugin_init(void **userdata, struct mosquitto_auth_opt *auth_
 			PSKSETUP;
 		}
 #endif		
-                if (!found) {
-                        _fatal("ERROR: configured back-end `%s' is not compiled in this plugin", q);
-                }
+
+#if BE_FILES
+		if (!strcmp(q, "files")) {
+			*bep = (struct backend_p *)malloc(sizeof(struct backend_p));
+			memset(*bep, 0, sizeof(struct backend_p));
+			(*bep)->name = strdup("files");
+			(*bep)->conf = be_files_init();
+			if ((*bep)->conf == NULL) {
+				_fatal("%s init returns NULL", q);
+			}
+			(*bep)->kill =  be_files_destroy;
+			(*bep)->getuser =  be_files_getuser;
+			(*bep)->superuser =  be_files_superuser;
+			(*bep)->aclcheck =  be_files_aclcheck;
+			found = 1;
+			PSKSETUP;
+		}
+#endif
+		if (!found) {
+			_fatal("ERROR: configured back-end `%s' is not compiled in this plugin", q);
+		}
 
 		ud->be_list[++nord] = NULL;
 		bep++;
-        }
+	}
 
-        free(p);
+	free(_p);
 
 	return (ret);
 }
@@ -396,12 +419,32 @@ int mosquitto_auth_plugin_cleanup(void *userdata, struct mosquitto_auth_opt *aut
 	if (ud->anonusername)
 		free(ud->anonusername);
 	if (ud->aclcache != NULL) {
-		struct aclcache *a, *tmp;
+		struct cacheentry *a, *tmp;
 
 		HASH_ITER(hh, ud->aclcache, a, tmp) {
 			HASH_DEL(ud->aclcache, a);
 			free(a);
 		}
+	}
+
+	if (ud->authcache != NULL) {
+		struct cacheentry *a, *tmp;
+
+		HASH_ITER(hh, ud->authcache, a, tmp) {
+			HASH_DEL(ud->authcache, a);
+			free(a);
+		}
+	}
+
+	if (ud->be_list) {
+		struct backend_p **bep;
+
+		for (bep = ud->be_list; bep && *bep; bep++) {
+			(*bep)->kill((*bep)->conf);
+			free((*bep)->name);
+			free(*bep);
+		}
+		free(ud->be_list);
 	}
 
 	free(ud);
@@ -425,12 +468,19 @@ int mosquitto_auth_unpwd_check(void *userdata, const char *username, const char 
 	struct userdata *ud = (struct userdata *)userdata;
 	struct backend_p **bep;
 	char *phash = NULL, *backend_name = NULL;
-	int match, authenticated = FALSE, nord;
+	int match, authenticated = FALSE, nord, granted;
 
 	if (!username || !*username || !password || !*password)
 		return MOSQ_DENY_AUTH;
 
 	_log(LOG_DEBUG, "mosquitto_auth_unpwd_check(%s)", (username) ? username : "<nil>");
+
+	granted = auth_cache_q(username, password, userdata);
+	if (granted != MOSQ_ERR_UNKNOWN) {
+		_log(LOG_DEBUG, "getuser(%s) CACHEDAUTH: %d",
+			username, (granted == MOSQ_ERR_SUCCESS) ? TRUE : FALSE);
+		return granted;
+	}
 
 	for (nord = 0, bep = ud->be_list; bep && *bep; bep++, nord++) {
 		struct backend_p *b = *bep;
@@ -469,7 +519,9 @@ int mosquitto_auth_unpwd_check(void *userdata, const char *username, const char 
 		free(phash);
 	}
 
-	return (authenticated) ? MOSQ_ERR_SUCCESS : MOSQ_DENY_AUTH;
+	granted = (authenticated) ? MOSQ_ERR_SUCCESS : MOSQ_DENY_AUTH;
+	auth_cache(username, password, granted, userdata);
+	return granted;
 }
 
 int mosquitto_auth_acl_check(void *userdata, const char *clientid, const char *username, const char *topic, int access)
@@ -484,6 +536,23 @@ int mosquitto_auth_acl_check(void *userdata, const char *clientid, const char *u
 		username = ud->anonusername;
 	}
 
+	/* We are using pattern based acls. Check whether the username or
+	 * client id contains a +, # or / and if so deny access.
+	 *
+	 * Without this, a malicious client may configure its username/client
+	 * id to bypass ACL checks (or have a username/client id that cannot
+	 * publish or receive messages to its own place in the hierarchy).
+	 */
+	if(username && strpbrk(username, "+#/")){
+		_log(MOSQ_LOG_NOTICE, "ACL denying access to client with dangerous username \"%s\"", username);
+		return MOSQ_DENY_ACL;
+	}
+
+	if(clientid && strpbrk(clientid, "+#/")){
+		_log(MOSQ_LOG_NOTICE, "ACL denying access to client with dangerous client id \"%s\"", clientid);
+		return MOSQ_DENY_ACL;
+	}
+
 	_log(LOG_DEBUG, "mosquitto_auth_acl_check(..., %s, %s, %s, %s)",
 		clientid ? clientid : "NULL",
 		username ? username : "NULL",
@@ -491,7 +560,7 @@ int mosquitto_auth_acl_check(void *userdata, const char *clientid, const char *u
 		access == MOSQ_ACL_READ ? "MOSQ_ACL_READ" : "MOSQ_ACL_WRITE" );
 
 
-	granted = cache_q(clientid, username, topic, access, userdata);
+	granted = acl_cache_q(clientid, username, topic, access, userdata);
 	if (granted != MOSQ_ERR_UNKNOWN) {
 		_log(LOG_DEBUG, "aclcheck(%s, %s, %d) CACHEDAUTH: %d",
 			username, topic, access, granted);
@@ -587,7 +656,7 @@ int mosquitto_auth_psk_key_get(void *userdata, const char *hint, const char *ide
 	for (bep = ud->be_list; bep && *bep; bep++) {
 		struct backend_p *b = *bep;
 		if (!strcmp(database, b->name)) {
-			psk_key = b->getuser(b->conf, username);
+			psk_key = b->getuser(b->conf, username, NULL, 0);
 			break;
 		}
 

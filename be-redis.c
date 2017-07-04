@@ -132,6 +132,7 @@ void be_redis_destroy(void *handle)
 	if (conf != NULL) {
 		redisFree(conf->redis);
 		conf->redis = NULL;
+		free(conf);
 	}
 }
 
@@ -203,4 +204,4 @@ int be_redis_aclcheck(void *handle, const char *clientid, const char *username, 
 	freeReplyObject(r);
 	return answer;
 }
-#endif				/* BE_REDIS */
+#endif /* BE_REDIS */
